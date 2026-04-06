@@ -1,0 +1,16 @@
+build/
+build2/
+.vscode/
+
+*.o
+*.obj
+*.d
+*.a
+*.axf
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+compile_commands.json
