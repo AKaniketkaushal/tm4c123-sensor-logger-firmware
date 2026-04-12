@@ -17,30 +17,28 @@ i2c_callback_t i2c_callback;
 
 void I2C2_Handler(void)
 {
-    uint32_t status = I2CMasterIntStatusEx(I2C2_BASE, true);
-    I2CMasterIntClearEx(I2C2_BASE, status);
-    uint32_t err = I2CMasterErr(I2C2_BASE);
+    uint32_t status = I2CMasterIntStatusEx(I2C2_BASE, false); // read WITHOUT clearing
+    uint32_t err    = I2CMasterErr(I2C2_BASE);                // read I2CMCS directly BEFORE clearing
+    I2CMasterIntClearEx(I2C2_BASE, status);                   // NOW clear
+
     uint8_t event = 0;
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
     if (status & I2C_MASTER_INT_DATA)
-        event |= I2C_DATA_TRANSMITTED;
-    if (status & I2C_MASTER_INT_TIMEOUT)
-        event |= I2C_EVT_CLK_TIMEOUT;
-    if (status & I2C_MASTER_INT_ARB_LOST)
-        event |= I2C_ARBITRATION_LOST;
-
-    if (status & I2C_MASTER_INT_NACK)
     {
-        if (err & I2C_MASTER_ERR_ADDR_ACK)
-            event |= I2C_EVT_NACK_ADDR;
-        else if (err & I2C_MASTER_ERR_DATA_ACK)
-            event |= I2C_EVT_NACK_DATA;
+        if      (err & I2C_MASTER_ERR_ADDR_ACK) event |= I2C_EVT_NACK_ADDR;
+        else if (err & I2C_MASTER_ERR_DATA_ACK) event |= I2C_EVT_NACK_DATA;
+        else                                     event |= I2C_DATA_TRANSMITTED;
     }
+
+    if (status & I2C_MASTER_INT_TIMEOUT)  event |= I2C_EVT_CLK_TIMEOUT;
+    if (status & I2C_MASTER_INT_ARB_LOST) event |= I2C_ARBITRATION_LOST;
 
     xQueueSendFromISR(i2c_isr_message, &event, &xHigherPriorityTaskWoken);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
+
+
 
 void i2c_register_callback(i2c_callback_t callback)
 {
@@ -110,11 +108,14 @@ void i2c_reinit()
 i2c_status_t i2c_wait(void)
 {
     uint8_t message;
-    if (xQueueReceive(i2c_isr_message, &message, pdMS_TO_TICKS(5)) == pdTRUE)
+    if (xQueueReceive(i2c_isr_message, &message, pdMS_TO_TICKS(20)) == pdTRUE)
     {
+        while(I2CMasterBusy(I2C2_BASE));
         if (i2c_callback)
+        {
             i2c_callback(message);
-
+        }
+    
         if (message & (I2C_EVT_NACK_ADDR | I2C_EVT_NACK_DATA | I2C_EVT_CLK_TIMEOUT | I2C_ARBITRATION_LOST))
             return I2C_FAIL;
 
@@ -124,9 +125,9 @@ i2c_status_t i2c_wait(void)
     {
         UARTPrint("I2C bus stuck, triggering recovery\r\n");
         i2c_reinit();
-        xQueueReset(i2c_isr_message);
         return I2C_FAIL;
     }
+
 }
 
 void i2c_init(void)
@@ -479,7 +480,7 @@ void i2c_scan(void)
         i2c_wait(); // NACK on missing device is expected — callback will print it
         
 
-        if (I2CMasterErr(I2C2_BASE) == I2C_MASTER_ERR_NONE)
+       if (I2CMasterErr(I2C2_BASE) == I2C_MASTER_ERR_NONE)
         {
             char buf[30];
             snprintf(buf, sizeof(buf), "Device at: 0x%02X\r\n", addr);
@@ -489,6 +490,29 @@ void i2c_scan(void)
     }
     UARTPrint("Scan complete\r\n");
 }
+
+// void i2c_scan(void)
+// {
+//     UARTPrint("Scanning I2C bus (via driver)...\r\n");
+//     char buf[40];
+//     uint8_t dummy = 0;
+
+//     for (uint8_t addr = 0x08; addr < 0x78; addr++)
+//     {
+//         // Use the actual driver — this will trigger the callback on NACK
+//         i2c_status_t result = i2c_read_byte_addr(I2C2_BASE, addr, 0x00, &dummy);
+
+//         if (result == I2C_OK)
+//         {
+//             snprintf(buf, sizeof(buf), "Device at: 0x%02X (reg[0x00]=0x%02X)\r\n", addr, dummy);
+//             UARTPrint(buf);
+//         }
+
+//         vTaskDelay(pdMS_TO_TICKS(5));
+//     }
+
+//     UARTPrint("Scan complete\r\n");
+// }
 
 void probe_unknown_devices(void)
 {

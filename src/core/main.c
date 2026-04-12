@@ -147,7 +147,7 @@ int main(void)
 
     Ble_commands    = xQueueCreate(10, sizeof(uint8_t));     // sensor_modes_t fits in uint8_t
     Ble_responses   = xQueueCreate(10, sizeof(ble_msg));
-    i2c_isr_message = xQueueCreate(10, sizeof(uint8_t));     // FIX: item size = 1 byte, NOT sizeof(char)*10
+    i2c_isr_message = xQueueCreate(120, sizeof(uint8_t));     // FIX: item size = 1 byte, NOT sizeof(char)*10
     debug_queue     = xQueueCreate(10, sizeof(uint8_t));
 
     t_mutex     = xSemaphoreCreateMutex();

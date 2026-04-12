@@ -5,6 +5,7 @@
  */
 
 #include "main.h"
+#include "timers.h"
 
 bmp180_t bmp180;
 HMC5883L_data_t hmc5883l;
@@ -12,6 +13,11 @@ MPU_6050_data_t mpu6050_data;
 static bool is_bmp180_ok = false;
 static bool is_mpu6050_ok = false;
 static bool is_hmc5883l_ok = false;
+static TimerHandle_t send_timer = NULL;
+static TimerHandle_t store_timer = NULL;
+#define NOTIFY_SEND (1 << 0)
+#define NOTIFY_STORE (1 << 1)
+extern TaskHandle_t sensor_handle;
 
 void eeprom_init()
 {
@@ -570,37 +576,13 @@ void send_magnetometer_data_ble(void)
  * SENSOR_TASK — FreeRTOS Task
  * ============================================================ */
 
-void switch_existing_mode(uint8_t mode)
-{
-    switch (mode)
-    {
-    case SENSORA_CONT:
-        send_temp_pressure_ble();
-        break;
-    case SENSORB_CONT:
-        send_gyro_data_ble();
-        break;
-    case SENSORC_CONT:
-        send_magnetometer_data_ble();
-        break;
-    case SENSOR_ALL_CONT:
-        send_temp_pressure_ble();
-        send_gyro_data_ble();
-        send_magnetometer_data_ble();
-        break;
-    default:
-        break;
-    }
-}
-
 void fill_bmp180_data(EepromRecord_t *rec, float temperature, float pressure)
 {
     rec->temperature = temperature;
     rec->pressure = pressure;
 }
 
-void fill_gyro_data(EepromRecord_t *rec, float ax, float ay, float az,
-                    float gx, float gy, float gz)
+void fill_gyro_data(EepromRecord_t *rec, float ax, float ay, float az, float gx, float gy, float gz)
 {
     rec->accel_x = ax;
     rec->accel_y = ay;
@@ -717,12 +699,19 @@ void store_sensor_data(uint8_t mode)
     push_to_eeprom(&rec);
 }
 
-void SENSOR_TASK(void *pvParameters)
+void send_timer_cb(TimerHandle_t xTimer)
 {
-    UARTPrint("Sensor task started\r\n");
-    sensor_modes_t mode = SENSOR_MODE_IDLE;
-    uint8_t ticks_count = 0;
-    uint8_t reinit_ticks = 0;
+    xTaskNotifyFromISR(sensor_handle, NOTIFY_SEND, eSetBits, NULL);
+}
+
+void store_timer_cb(TimerHandle_t xTimer)
+{
+    xTaskNotifyFromISR(sensor_handle, NOTIFY_STORE, eSetBits, NULL);
+}
+
+void init_sensors()
+{
+
     bmp180_init();
     wdt_update(WDT_BIT_SENSOR);
     MPU_6050_init();
@@ -742,110 +731,124 @@ void SENSOR_TASK(void *pvParameters)
 
     HMC5883L_init();
     wdt_update(WDT_BIT_SENSOR);
-    //  calibrate_mpu6050();
-    uint8_t feed = 0;
-
     UARTPrint("Sensor task initialized sensors\r\n");
+}
 
+void process_sensor_mode(uint8_t mode, bool store_enable)
+{
+    switch (mode)
+    {
+    case SENSORA:
+    case SENSORA_CONT:
+        send_temp_pressure_ble();
+        if (is_bmp180_ok && store_enable)
+            store_sensor_data(mode);
+        break;
+
+    case SENSORB:
+    case SENSORB_CONT:
+        send_gyro_data_ble();
+        if (is_mpu6050_ok && store_enable)
+            store_sensor_data(mode);
+        break;
+
+    case SENSORC:
+    case SENSORC_CONT:
+        send_magnetometer_data_ble();
+        if (is_hmc5883l_ok && store_enable)
+            store_sensor_data(mode);
+        break;
+
+    case SENSOR_ALL:
+    case SENSOR_ALL_CONT:
+        send_temp_pressure_ble();
+        send_gyro_data_ble();
+        send_magnetometer_data_ble();
+        if (is_bmp180_ok && is_mpu6050_ok && is_hmc5883l_ok && store_enable)
+            store_sensor_data(mode);
+        break;
+    }
+}
+
+void check_sensor_health()
+{
+    if (!is_bmp180_ok)
+    {
+        UARTPrint("Reinitializing BMP180...\r\n");
+        bmp180_init();
+    }
+    if (!is_mpu6050_ok)
+    {
+        UARTPrint("Reinitializing MPU6050...\r\n");
+        MPU_6050_init();
+        if (is_mpu6050_ok)
+        {
+            calibrate_mpu6050();
+        }
+    }
+    if (!is_hmc5883l_ok)
+    {
+        UARTPrint("Reinitializing HMC5883L...\r\n");
+        HMC5883L_init();
+    }
+}
+
+void SENSOR_TASK(void *pvParameters)
+{
+    UARTPrint("Sensor task started\r\n");
+    send_timer = xTimerCreate("send", pdMS_TO_TICKS(1000), pdTRUE, NULL, send_timer_cb);
+    store_timer = xTimerCreate("store", pdMS_TO_TICKS(30000), pdTRUE, NULL, store_timer_cb);
+    uint8_t reinit_ticks = 0;
+    sensor_modes_t mode = SENSOR_MODE_IDLE;
+
+    init_sensors();
     while (1)
     {
         if (xQueueReceive(Ble_commands, &mode, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            feed = 0;
             switch (mode)
             {
             case SENSORA:
-                send_temp_pressure_ble();
-                if (is_bmp180_ok)
-                    store_sensor_data(mode);
-                break;
             case SENSORB:
-                send_gyro_data_ble();
-                if (is_mpu6050_ok)
-                    store_sensor_data(mode);
-                break;
             case SENSORC:
-                send_magnetometer_data_ble();
-                if (is_hmc5883l_ok)
-                    store_sensor_data(mode);
-                break;
             case SENSOR_ALL:
-                send_temp_pressure_ble();
-                send_gyro_data_ble();
-                send_magnetometer_data_ble();
-                if (is_bmp180_ok && is_mpu6050_ok && is_hmc5883l_ok)
-                    store_sensor_data(mode);
+                xTimerStop(send_timer, 0);
+                xTimerStop(store_timer, 0);
+                process_sensor_mode(mode, true);
                 break;
-            default:
-                break;
-            }
-            switch_existing_mode(mode);
-        }
-        else
-        {
-            feed++;
-        }
-        if (feed == 20)
-        {
-            feed = 0;
-            ticks_count++;
-            switch_existing_mode(mode);
-            if (ticks_count == 30) // Example condition, adjust as needed
-            {
-                ticks_count = 0;
-                if (mode != SENSOR_MODE_IDLE)
-                {
-                    switch (mode)
-                    {
-                    case SENSORA_CONT:
-                        if (is_bmp180_ok)
-                            store_sensor_data(mode);
-                        break;
-                    case SENSORB_CONT:
-                        if (is_mpu6050_ok)
-                            store_sensor_data(mode);
-                        break;
-                    case SENSORC_CONT:
-                        if (is_hmc5883l_ok)
-                            store_sensor_data(mode);
-                        break;
-                    case SENSOR_ALL_CONT:
-                        if (is_bmp180_ok && is_mpu6050_ok && is_hmc5883l_ok)
-                            store_sensor_data(mode);
-                        break;
-                    default:
-                        break;
-                    }
 
-                   
-                }
+            case SENSORA_CONT:
+            case SENSORB_CONT:
+            case SENSORC_CONT:
+            case SENSOR_ALL_CONT:
+                xTimerStart(send_timer, 0);
+                xTimerStart(store_timer, 0);
+                break;
             }
         }
+
+        uint32_t flags = 0;
+        if (xTaskNotifyWait(0, NOTIFY_SEND | NOTIFY_STORE, &flags, 0) == pdTRUE)
+        {
+            if (flags & NOTIFY_SEND)
+            {
+                process_sensor_mode(mode, false);
+                wdt_update(WDT_BIT_SENSOR);
+            }
+
+            if (flags & NOTIFY_STORE)
+            {
+                process_sensor_mode(mode, true);
+                wdt_update(WDT_BIT_SENSOR);
+            }
+        }
+
         reinit_ticks++;
         if (reinit_ticks == 40)
         {
             reinit_ticks = 0;
-            if (!is_bmp180_ok)
-            {
-                UARTPrint("Reinitializing BMP180...\r\n");
-                bmp180_init();
-            }
-            if (!is_mpu6050_ok)
-            {
-                UARTPrint("Reinitializing MPU6050...\r\n");
-                MPU_6050_init();
-                if (is_mpu6050_ok)
-                {
-                    calibrate_mpu6050();
-                }
-            }
-            if (!is_hmc5883l_ok)
-            {
-                UARTPrint("Reinitializing HMC5883L...\r\n");
-                HMC5883L_init();
-            }
+            check_sensor_health();
         }
-
         wdt_update(WDT_BIT_SENSOR);
     }
 }
