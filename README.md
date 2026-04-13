@@ -74,10 +74,10 @@ The main task communication primitives used in the code are:
 
                           ┌────────────────────────────┐
                           │        PC TERMINAL         │
-                          │        (UART0)             │
+                          │        (UART1)             │
                           └────────────┬───────────────┘
                                        │
-                              UART0 ISR (DEBUG RX)
+                              UART1 ISR (DEBUG RX)
                                        │
                      Stream Buffer (uart_debug_rx_buffer)
                                        │
@@ -100,18 +100,18 @@ The main task communication primitives used in the code are:
 
                           ┌────────────────────────────┐
                           │        BLE MODULE          │
-                          │        (UART1)             │
+                          │        (UART0)             │
                           └────────────┬───────────────┘
                                        │
-                              UART1 ISR (BLE RX)
+                              UART0 ISR (BLE RX)
                                        │
                       Stream Buffer (uart_ble_rx_buffer)
                                        │
                                        ▼
-                         ┌────────────────────────┐
-                         │ BLE_RECEIVE_TASK       │
-                         │ - parse BLE commands   │
-                         └──────────┬─────────────┘
+                          ┌────────────────────────┐
+                          │ BLE_RECEIVE_TASK       │
+                          │ - parse BLE commands   │
+                          └──────────┬─────────────┘
                                     │ Queue (Ble_commands)
                                     ▼
                               ┌──────────────┐
