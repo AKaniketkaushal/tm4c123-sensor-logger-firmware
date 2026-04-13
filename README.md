@@ -1,29 +1,34 @@
 # TM4C123 Sensor Logger Firmware
 
-FreeRTOS-based firmware for the TI TM4C123GXL LaunchPad that samples multiple sensors, streams data over BLE, supports a UART debug console, logs records to internal EEPROM, and supervises task liveness with a watchdog.
+FreeRTOS-based firmware for the TI TM4C123GXL LaunchPad that reads multiple sensors, streams telemetry over BLE, exposes a UART debug console, logs records to internal EEPROM, and supervises task liveness with a software watchdog layered over the TM4C123 hardware watchdog.
 
 ## Overview
 
-This project is a practical embedded systems firmware project built around real hardware bring-up, RTOS task coordination, sensor integration, and fault-aware operation.
+This project is a practical embedded firmware project focused on:
 
-The firmware currently supports:
+- real hardware bring-up on TM4C123
+- RTOS task coordination
+- queue- and stream-buffer-based communication
+- multi-sensor I2C integration
+- BLE and UART command handling
+- EEPROM-backed data logging
+- watchdog-aware runtime supervision
 
-- BMP180 temperature and pressure sensing
-- MPU6050 accelerometer and gyroscope sensing
-- QMC5883L/HMC5883L-compatible magnetometer sensing
-- BLE command and response handling over UART
-- UART debug console commands
-- EEPROM-backed sensor record storage
-- Watchdog-based runtime supervision
-- I2C communication and recovery support
+The current firmware supports both one-shot and continuous sensor acquisition flows, with continuous sampling driven by FreeRTOS software timers and task notifications inside the sensor subsystem.
+
+## Supported Sensors
+
+- BMP180 for temperature and pressure
+- MPU6050 for accelerometer and gyroscope data
+- QMC5883L/HMC5883L-compatible magnetometer on the shared I2C bus
 
 ## Hardware
 
 - TI TM4C123GXL LaunchPad
 - BMP180
 - MPU6050
-- Magnetometer module on the project I2C bus
-- BLE UART module
+- magnetometer module on I2C2
+- BLE UART module such as HW-290 / AT-09 class modules
 
 ## Software Stack
 
@@ -32,39 +37,61 @@ The firmware currently supports:
 - TivaWare
 - CMSIS
 - CMake
-- `arm-none-eabi` toolchain
+- GNU Arm Embedded Toolchain (`arm-none-eabi`)
+
+## Runtime Architecture
+
+The firmware is organized around these FreeRTOS tasks:
+
+- `BLE_SEND_TASK`: dequeues BLE responses and transmits them over UART1
+- `BLE_RECEIVE_TASK`: parses UART1 input into sensor commands
+- `DEBUG_CONSOLE_TASK`: parses UART0 debug commands
+- `DEBUG_TASK`: executes debug actions and diagnostics
+- `SENSOR_TASK`: owns sensor reads, continuous sampling flow, and EEPROM logging
+- `WDT_MANAGER_TASK`: validates task liveness bits and refreshes the hardware watchdog
+
+The main task communication primitives used in the code are:
+
+- queues for command and response dispatch
+- stream buffers for UART ISR-to-task data transfer
+- task notifications for timer-driven sensor send/store events
+- mutex-protected UART printing
+
+## Sensor Flow
+
+The sensor subsystem supports two styles of operation:
+
+- one-shot commands such as reading a sensor once and optionally storing the record
+- continuous modes where periodic BLE sends and EEPROM stores are scheduled separately
+
+In the current implementation:
+
+- a FreeRTOS software timer drives periodic telemetry sends
+- a second timer drives slower EEPROM logging
+- `SENSOR_TASK` receives timer notifications and processes the active sensor mode
+- sensor health is monitored and failed devices are re-initialized periodically
+
+## Peripherals and Interfaces
+
+- `UART0`: debug console input/output
+- `UART1`: BLE module interface
+- `I2C2`: shared sensor bus
+- internal EEPROM: circular record storage
 
 ## Project Structure
 
-- [src/core](/c:/tm4c123gxl/src/core): startup, RTOS object creation, task creation
+- [src/core](/c:/tm4c123gxl/src/core): startup, system init, RTOS object creation, task creation
 - [src/drivers](/c:/tm4c123gxl/src/drivers): UART and I2C drivers
-- [src/sensor](/c:/tm4c123gxl/src/sensor): sensor init, reads, calibration, EEPROM record handling
-- [src/ble](/c:/tm4c123gxl/src/ble): BLE send/receive tasks and command handling
-- [src/debug](/c:/tm4c123gxl/src/debug): debug console and diagnostics
-- [src/wdt](/c:/tm4c123gxl/src/wdt): watchdog manager and liveness tracking
+- [src/sensor](/c:/tm4c123gxl/src/sensor): sensor init, acquisition, calibration, timer-driven sampling, EEPROM record handling
+- [src/ble](/c:/tm4c123gxl/src/ble): BLE send/receive tasks and command dispatch
+- [src/debug](/c:/tm4c123gxl/src/debug): debug console command parsing and diagnostics
+- [src/wdt](/c:/tm4c123gxl/src/wdt): watchdog manager and task heartbeat tracking
 - [src/utils](/c:/tm4c123gxl/src/utils): helper and formatting utilities
-- [linker](/c:/tm4c123gxl/linker): linker scripts
+- [src/middleware](/c:/tm4c123gxl/src/middleware): middleware configuration such as FreeRTOS config
+- [linker](/c:/tm4c123gxl/linker): linker script
 - [Freertos](/c:/tm4c123gxl/Freertos): FreeRTOS kernel sources
-- [CMSIS](/c:/tm4c123gxl/CMSIS): CMSIS headers and device support
+- [CMSIS](/c:/tm4c123gxl/CMSIS): CMSIS and device support files
 - [tivaware](/c:/tm4c123gxl/tivaware): TivaWare driver library sources
-
-## Architecture
-
-The firmware is organized around FreeRTOS tasks for:
-
-- BLE transmit
-- BLE receive
-- debug console processing
-- sensor sampling and command handling
-- watchdog supervision
-
-Commands arrive through BLE or UART, are dispatched through queues, and are processed by the appropriate task. Sensor results can be:
-
-- transmitted live over BLE
-- printed over the debug UART
-- stored in internal EEPROM as records
-
-The sensor subsystem supports both one-shot and continuous sampling behavior, while the watchdog subsystem monitors task health and refreshes the hardware watchdog only when expected tasks remain responsive.
 
 ## Build
 
@@ -86,16 +113,9 @@ Relevant build files:
 - [CMakeLists.txt](/c:/tm4c123gxl/CMakeLists.txt)
 - [toolchain-arm-none-eabi.cmake](/c:/tm4c123gxl/toolchain-arm-none-eabi.cmake)
 
-## Runtime Notes
-
-- EEPROM is initialized during startup
-- I2C2 is used for the sensor bus
-- UART0 is used for debug input/output
-- UART1 is used for the BLE module
-
 ## Debug Commands
 
-Example commands supported by the firmware include:
+The firmware currently includes debug commands such as:
 
 - `BLE_CHECK_CONNECTION`
 - `I2C_SCAN`
@@ -108,33 +128,35 @@ Example commands supported by the firmware include:
 - `CALIBRATE_HMC5883L`
 - `CALIB_STOP`
 
-Command handling is implemented in [my_debug.c](/c:/tm4c123gxl/src/debug/my_debug.c).
+Command parsing and execution live primarily in [my_debug.c](/c:/tm4c123gxl/src/debug/my_debug.c).
 
 ## What This Project Demonstrates
 
 - RTOS task design on a Cortex-M microcontroller
-- queue- and stream-buffer-based task communication
-- multi-sensor I2C integration
-- BLE/UART command handling
+- ISR-to-task communication using stream buffers and queues
+- timer-driven periodic work using FreeRTOS timers and notifications
+- multi-sensor I2C integration and bus recovery
+- BLE/UART command-driven telemetry flow
 - EEPROM-backed embedded logging
 - watchdog-aware firmware design
-- fault detection and recovery-oriented embedded development
+- fault detection and sensor recovery behavior on real hardware
 
 ## Current Limitations
 
-- some sensor recovery paths still need hardening
-- debug output and logging are still fairly synchronous
-- EEPROM record metadata can be expanded further
+- some recovery paths still need more hardening and validation
+- debug output is still fairly synchronous
 - BLE command/response framing can be made more structured
+- EEPROM record metadata and validation can be expanded further
+- some implementation details are still being refined as the firmware evolves
 
 ## Roadmap
 
-- improve sensor recovery and retry behavior
-- move toward more structured periodic/event-driven scheduling
-- make logging more asynchronous
-- extend EEPROM metadata and record validation
-- persist calibration and configuration data
+- tighten sensor recovery and retry behavior
+- improve command protocol structure for BLE and debug interfaces
+- move more logging and diagnostics off synchronous paths
+- expand EEPROM metadata and record validation
+- persist calibration/configuration data in EEPROM
 
 ## Showcase Summary
 
-This project is meant to demonstrate practical embedded firmware work rather than a minimal demo application. The focus is on real-device integration, RTOS-based coordination, telemetry flow, persistent logging, and robustness improvements on TM4C123 hardware.
+This project is intended to show practical embedded systems work rather than a minimal sensor demo. The focus is on task coordination, interrupt-to-task communication, sensor integration, telemetry flow, persistent logging, and robustness improvements on TM4C123 hardware.

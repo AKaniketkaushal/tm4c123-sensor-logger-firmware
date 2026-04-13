@@ -1,40 +1,54 @@
-#include "main.h"   
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include "inc/hw_memmap.h"
+#include "inc/hw_types.h"
+#include "driver/gpio.h"
+#include "i2c.h"
+#include "driver/sysctl.h"
+#include "uart.h"
+#include <math.h>
+#include <stdio.h>
+#include "driver/rom.h"
+#include "pin_map.h"
+#include "TM4C123.h"
+#include "FreeRTOS.h"
+#include "FreeRTOSConfig.h"
+#include "stream_buffer.h"
+#include "task.h"
+#include "queue.h"
+#include "semphr.h"
+#include "watchdog.h"
+#include "my_uart.h"
+#include "sensor.h"
+#include "my_debug.h"
+#include "helper.h"
+#include "BLE.h"
+#include "main.h"
 
-SemaphoreHandle_t t_mutex; // Mutex for UART access
-
-
-
-
-
-
-TaskHandle_t wdt_manager_handle = NULL;
+#define QUEUE_SEND_TIMEOUT  pdMS_TO_TICKS(50)
+#define WDT_TIMEOUT_MS 300
+#define STREAM_BUFFER_SIZE_BYTES (100)
+#define STREAM_BUFFER_TRIGGER_LEVEL (1)
 
 extern uint32_t SystemCoreClock;
+
 QueueHandle_t Ble_commands;                            // Commands from BLE → SENSOR_TASK
 QueueHandle_t Ble_responses;                           // Responses from SENSOR_TASK → BLE_SEND_TASK
 QueueHandle_t i2c_isr_message;                         // Messages from I2C ISR → SENSOR_TASK
 QueueHandle_t debug_queue;                             // For debug messages from various tasks → print_isr task
 StreamBufferHandle_t uart1_str_buffer;                 // For UART1 ISR to send received data to BLE_RECEIVE_TASK
+SemaphoreHandle_t t_mutex;                             // Mutex for UART access
 const TickType_t buffer_wait_time = pdMS_TO_TICKS(50); // 100ms timeout
 
-static char uart_buffer[40];
-static int uart_buffer_index = 0;
-static bool uart_buffer_received = false;
-#define STREAM_BUFFER_SIZE_BYTES (100)
-#define STREAM_BUFFER_TRIGGER_LEVEL (1)
-
 StreamBufferHandle_t uart_str_buffer;
-
-
-
-
 
 TaskHandle_t ble_send_handle   = NULL;
 TaskHandle_t ble_recv_handle   = NULL;
 TaskHandle_t debug_console_handle = NULL;
 TaskHandle_t sensor_handle     = NULL;
 TaskHandle_t debug_handle      = NULL;
-
+TaskHandle_t wdt_manager_handle = NULL;
 
 
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
@@ -83,113 +97,57 @@ void system_init(void)
 
 void HardFault_Handler(void)
  {
-    UARTPrint("HardFault_Handler: A hard fault has occurred!\r\n");
+  char buffer[] = "HardFault_Handler...";
+  char *p = buffer; // Create a pointer that can be incremented
+  while(*p != '\0')
+  {
+    UARTCharPut(UART0_BASE, *p++);
+  }
     while(1)
     {
+        
     }
  }
 
-// int main(void)
-// {
-//    eeprom_init();
-//    system_init();
-//    uart_init();
-//    i2c_init();
-//   //  ble_init(); // Called initilly to set baud rate to 38400, will be reconfigured in BLE_SEND_TASK based on debug commands
-    
-//    uart_str_buffer = xStreamBufferCreate(STREAM_BUFFER_SIZE_BYTES, STREAM_BUFFER_TRIGGER_LEVEL);
-//    Ble_commands = xQueueCreate(10, sizeof(char)); // Commands from BLE → SENSOR_TASK
-//    Ble_responses = xQueueCreate(10, sizeof(ble_msg));
-//    i2c_isr_message = xQueueCreate(10, sizeof(char) * 10);
-//    debug_queue = xQueueCreate(10, sizeof(char));
-//    uart1_str_buffer = xStreamBufferCreate(STREAM_BUFFER_SIZE_BYTES, STREAM_BUFFER_TRIGGER_LEVEL); // For ISR to print messages via print_isr task
-//    t_mutex = xSemaphoreCreateMutex();
-//    print_mutex = xSemaphoreCreateMutex();
-//    xTaskCreate(BLE_SEND_TASK,       "BLE_SEND",      256, NULL, 1, &ble_send_handle);
-//    xTaskCreate(BLE_RECEIVE_TASK,    "BLE_RECV",      256, NULL, 1, &ble_recv_handle);
-//    xTaskCreate(DEBUG_CONSOLE_TASK,  "DBG_CONSOLE",   256, NULL, 1, &debug_console_handle);
-//    xTaskCreate(SENSOR_TASK,         "SENSOR",        512, NULL, 2, &sensor_handle);
-//    xTaskCreate(DEBUG_TASK,          "DEBUG",         256, NULL, 1, &debug_handle);
-//    xTaskCreate(WDT_MANAGER_TASK,    "WDT_MANAGER",   128, NULL, 1, &wdt_manager_handle);
-
-//     UARTPrint("Starting FreeRTOS Scheduler...\r\n");
-//     UARTPrint("System initialized successfully\r\n");
-//     vTaskStartScheduler();
-//     while (1)
-//     {
-//         SysCtlDelay(SysCtlClockGet() / 3);
-//         UARTPrint("Starting FreeRTOS Scheduler...\r\n");
-//     }
-//     return 0;
-// }
 int main(void)
 {
-    /* =========================================================
-     * STEP 1 — Hardware init (no FreeRTOS objects exist yet,
-     *           no ISRs that touch queues should fire here)
-     * ========================================================= */
-    eeprom_init();
-    system_init();
-    uart_init();
+   eeprom_init();
+   system_init();
+   uart_init();
+    //  ble_init();
+   /* Create ISR-dependent RTOS objects before enabling I2C2 IRQs. */
+  
 
-    /* =========================================================
-     * STEP 2 — Create ALL FreeRTOS objects BEFORE any peripheral
-     *           that enables an IRQ which calls FromISR APIs.
-     *
-     *           CRITICAL: i2c_isr_message MUST exist before
-     *           i2c_init() calls NVIC_EnableIRQ(I2C2_IRQn).
-     *           A NULL queue handle in xQueueSendFromISR = HardFault.
-     * ========================================================= */
-    uart_str_buffer  = xStreamBufferCreate(STREAM_BUFFER_SIZE_BYTES,
-                                           STREAM_BUFFER_TRIGGER_LEVEL);
-    uart1_str_buffer = xStreamBufferCreate(STREAM_BUFFER_SIZE_BYTES,
-                                           STREAM_BUFFER_TRIGGER_LEVEL);
+   uart_str_buffer = xStreamBufferCreate(STREAM_BUFFER_SIZE_BYTES, STREAM_BUFFER_TRIGGER_LEVEL);
+   Ble_commands = xQueueCreate(10, sizeof(char)); // Commands from BLE → SENSOR_TASK
+   Ble_responses = xQueueCreate(10, sizeof(ble_msg));
+   i2c_isr_message = xQueueCreate(10, sizeof(uint8_t));
+   debug_queue = xQueueCreate(10, sizeof(uint8_t));
+   uart1_str_buffer = xStreamBufferCreate(STREAM_BUFFER_SIZE_BYTES, STREAM_BUFFER_TRIGGER_LEVEL); // For ISR to print messages via print_isr task
+   t_mutex = xSemaphoreCreateMutex();
 
-    Ble_commands    = xQueueCreate(10, sizeof(uint8_t));     // sensor_modes_t fits in uint8_t
-    Ble_responses   = xQueueCreate(10, sizeof(ble_msg));
-    i2c_isr_message = xQueueCreate(120, sizeof(uint8_t));     // FIX: item size = 1 byte, NOT sizeof(char)*10
-    debug_queue     = xQueueCreate(10, sizeof(uint8_t));
+   configASSERT(uart_str_buffer  != NULL);
+   configASSERT(uart1_str_buffer != NULL);
+   configASSERT(Ble_commands     != NULL);
+   configASSERT(Ble_responses    != NULL);
+   configASSERT(i2c_isr_message  != NULL);
+   configASSERT(debug_queue      != NULL);
+   configASSERT(t_mutex          != NULL);
 
-    t_mutex     = xSemaphoreCreateMutex();
-
-    /* Catch allocation failures early — never silently proceed
-       with a NULL handle into ISR territory                    */
-    configASSERT(uart_str_buffer  != NULL);
-    configASSERT(uart1_str_buffer != NULL);
-    configASSERT(Ble_commands     != NULL);
-    configASSERT(Ble_responses    != NULL);
-    configASSERT(i2c_isr_message  != NULL);  // most critical
-    configASSERT(debug_queue      != NULL);
-    configASSERT(t_mutex          != NULL);
-    
-
-    /* =========================================================
-     * STEP 3 — NOW safe to init I2C.
-     *           i2c_isr_message exists, so I2C2_Handler can fire
-     *           without crashing.
-     * ========================================================= */
-    i2c_init();
-
-    /* =========================================================
-     * STEP 4 — BLE init (if it also enables an IRQ, it belongs
-     *           here after its queue/semaphore deps are ready)
-     * ========================================================= */
-    // ble_init();
-
-    /* =========================================================
-     * STEP 5 — Create tasks
-     * ========================================================= */
-    xTaskCreate(BLE_SEND_TASK,      "BLE_SEND",    256, NULL, 1, &ble_send_handle);
-    xTaskCreate(BLE_RECEIVE_TASK,   "BLE_RECV",    256, NULL, 1, &ble_recv_handle);
-    xTaskCreate(DEBUG_CONSOLE_TASK, "DBG_CONSOLE", 256, NULL, 1, &debug_console_handle);
-    xTaskCreate(SENSOR_TASK,        "SENSOR",      512, NULL, 2, &sensor_handle);
-    xTaskCreate(DEBUG_TASK,         "DEBUG",       512, NULL, 1, &debug_handle);
-    xTaskCreate(WDT_MANAGER_TASK,   "WDT_MANAGER", 128, NULL, 1, &wdt_manager_handle);
+   i2c_init();
+   xTaskCreate(BLE_SEND_TASK,       "BLE_SEND",      256, NULL, 1, &ble_send_handle);
+   xTaskCreate(BLE_RECEIVE_TASK,    "BLE_RECV",      256, NULL, 1, &ble_recv_handle);
+   xTaskCreate(DEBUG_CONSOLE_TASK,  "DBG_CONSOLE",   256, NULL, 1, &debug_console_handle);
+   xTaskCreate(SENSOR_TASK,         "SENSOR",        512, NULL, 1, &sensor_handle);
+   xTaskCreate(DEBUG_TASK,          "DEBUG",         256, NULL, 1, &debug_handle);
+   xTaskCreate(WDT_MANAGER_TASK,    "WDT_MANAGER",   128, NULL, 1, &wdt_manager_handle);
 
     UARTPrint("Starting FreeRTOS Scheduler...\r\n");
     vTaskStartScheduler();
-
-    /* Should never reach here */
-    while (1);
+    while (1)
+    {
+        SysCtlDelay(SysCtlClockGet() / 3);
+        UARTPrint("Starting FreeRTOS Scheduler...\r\n");
+    }
     return 0;
 }
