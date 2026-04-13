@@ -72,94 +72,99 @@ The main task communication primitives used in the code are:
                         TM4C123 SENSOR LOGGER SYSTEM
 ================================================================================
 
-                          ┌────────────────────────────┐
-                          │        PC TERMINAL         │
-                          │        (UART1)             │
-                          └────────────┬───────────────┘
-                                       │
-                              UART1 ISR (DEBUG RX)
-                                       │
-                     Stream Buffer (uart_debug_rx_buffer)
-                                       │
-                                       ▼
-                    ┌──────────────────────────┐
-                    │ DEBUG_CONSOLE_TASK       │
-                    │ - parse commands         │
-                    │ - send to debug_queue    │
-                    └────────────┬─────────────┘
-                                 │
-                                 ▼
-                          ┌──────────────┐
-                          │ DEBUG_TASK   │
-                          │ diagnostics  │
-                          └──────┬───────┘
-                                 │
-                                 │ Direct sensor access for debug flows
-                                 ▼
+                           DEBUG / UART0 PATH
+
+                         +----------------------------+
+                         |        PC TERMINAL         |
+                         |           UART0            |
+                         +-------------+--------------+
+                                       |
+                              UART0 ISR (debug RX)
+                                       |
+                    Stream Buffer (uart_debug_rx_buffer)
+                                       |
+                                       v
+                    +--------------------------------+
+                    | DEBUG_CONSOLE_TASK             |
+                    | - parse debug commands         |
+                    | - send work to debug_queue     |
+                    +---------------+----------------+
+                                    |
+                                    v
+                             +--------------+
+                             | DEBUG_TASK   |
+                             | diagnostics  |
+                             +------+-------+
+                                    |
+                                    | direct diagnostic sensor access
+                                    v
 
 
-                          ┌────────────────────────────┐
-                          │        BLE MODULE          │
-                          │        (UART0)             │
-                          └────────────┬───────────────┘
-                                       │
-                              UART0 ISR (BLE RX)
-                                       │
+                            BLE / UART1 PATH
+
+                         +----------------------------+
+                         |        BLE MODULE          |
+                         |           UART1            |
+                         +-------------+--------------+
+                                       |
+                               UART1 ISR (BLE RX)
+                                       |
                       Stream Buffer (uart_ble_rx_buffer)
-                                       │
-                                       ▼
-                          ┌────────────────────────┐
-                          │ BLE_RECEIVE_TASK       │
-                          │ - parse BLE commands   │
-                          └──────────┬─────────────┘
-                                    │ Queue (Ble_commands)
-                                    ▼
-                              ┌──────────────┐
-                              │ SENSOR_TASK  │
-                              │ (Core Engine)│
-                              └──────┬───────┘
-                                     │
-     ┌───────────────────────────────┼───────────────────────────────┐
-     │                               │                               │
-     ▼                               ▼                               ▼
-┌──────────────┐            ┌──────────────┐              ┌──────────────┐
-│ Sensor Read  │            │ Data Format  │              │ EEPROM       │
-│ (Drivers)    │            │ + BLE Packet │              │ Logging      │
-└──────┬───────┘            └──────┬───────┘              └──────┬───────┘
-       │                           │                             │
-       ▼                           ▼                             ▼
- ┌──────────────┐         ┌──────────────┐              ┌──────────────┐
- │ BMP180       │         │ BLE_SEND_TASK│              │ EEPROM HW    │
- │ MPU6050      │         │ (UART1 TX)   │              │ (Internal)   │
- │ HMC5883L     │         └──────────────┘              └──────────────┘
- └──────┬───────┘
-        │
-        ▼
-  ┌──────────────┐
-  │ I2C DRIVER   │
-  │ (I2C2)       │
-  └──────┬───────┘
-         │
-         ▼
-  ┌──────────────┐
-  │ I2C2 ISR     │
-  │ → Queue      │
-  └──────────────┘
+                                       |
+                                       v
+                        +------------------------------+
+                        | BLE_RECEIVE_TASK             |
+                        | - parse BLE commands         |
+                        +--------------+---------------+
+                                       |
+                                       | Queue: Ble_commands
+                                       v
+                             +----------------+
+                             |  SENSOR_TASK   |
+                             |  Core engine   |
+                             +-------+--------+
+                                     |
+        +----------------------------+----------------------------+
+        |                            |                            |
+        v                            v                            v
+ +---------------+         +----------------+           +----------------+
+ | Sensor Read   |         | Data Format    |           | EEPROM         |
+ | + Drivers     |         | + BLE Packet   |           | Logging        |
+ +-------+-------+         +--------+-------+           +--------+-------+
+         |                          |                            |
+         v                          v                            v
+ +---------------+         +----------------+           +----------------+
+ | BMP180        |         | BLE_SEND_TASK  |           | EEPROM HW      |
+ | MPU6050       |         | UART1 TX       |           | Internal       |
+ | HMC5883L      |         +----------------+           +----------------+
+ +-------+-------+
+         |
+         v
+ +---------------+
+ | I2C DRIVER    |
+ | I2C2          |
+ +-------+-------+
+         |
+         v
+ +---------------+
+ | I2C2 ISR      |
+ | + event queue |
+ +---------------+
 
 
 ================================================================================
                          TIMER + EVENT SYSTEM
 ================================================================================
 
-   SEND TIMER  → SENSOR_TASK (notify SEND)
-   STORE TIMER → SENSOR_TASK (notify STORE)
+   SEND TIMER  -> SENSOR_TASK (notify SEND)
+   STORE TIMER -> SENSOR_TASK (notify STORE)
 
 
 ================================================================================
                          WATCHDOG SYSTEM
 ================================================================================
 
-   All tasks → wdt_update() → WDT_MANAGER_TASK → Hardware Watchdog
+   All tasks -> wdt_update() -> WDT_MANAGER_TASK -> Hardware Watchdog
 ```
 
 ## Sensor Flow
@@ -180,23 +185,23 @@ In the current implementation:
 
 BLE flow:
 
-- BLE module → UART1 ISR → stream buffer → `BLE_RECEIVE_TASK`
-- `BLE_RECEIVE_TASK` → `Ble_commands` queue → `SENSOR_TASK`
-- `SENSOR_TASK` → format response → `BLE_SEND_TASK` → UART1 TX
+- BLE module -> UART1 ISR -> stream buffer -> `BLE_RECEIVE_TASK`
+- `BLE_RECEIVE_TASK` -> `Ble_commands` queue -> `SENSOR_TASK`
+- `SENSOR_TASK` -> format response -> `BLE_SEND_TASK` -> UART1 TX
 
 Debug flow:
 
-- PC terminal → UART0 ISR → debug RX stream buffer → `DEBUG_CONSOLE_TASK`
-- `DEBUG_CONSOLE_TASK` → `debug_queue` → `DEBUG_TASK`
+- PC terminal -> UART0 ISR -> debug RX stream buffer -> `DEBUG_CONSOLE_TASK`
+- `DEBUG_CONSOLE_TASK` -> `debug_queue` -> `DEBUG_TASK`
 - `DEBUG_TASK` can trigger direct diagnostic sensor actions
 
 I2C flow:
 
-- `SENSOR_TASK` → I2C driver → I2C2 ISR / event queue → sensor transaction result
+- `SENSOR_TASK` -> I2C driver -> I2C2 ISR / event queue -> sensor transaction result
 
 Storage flow:
 
-- `SENSOR_TASK` → EEPROM record creation → internal EEPROM circular buffer
+- `SENSOR_TASK` -> EEPROM record creation -> internal EEPROM circular buffer
 
 ## Peripherals and Interfaces
 
