@@ -67,6 +67,8 @@ The main task communication primitives used in the code are:
 
 ## System Diagram
 
+For the full styled architecture view, see [architecture.html](/c:/tm4c123gxl/architecture.html).
+
 ```text
 ================================================================================
                         TM4C123 SENSOR LOGGER SYSTEM
