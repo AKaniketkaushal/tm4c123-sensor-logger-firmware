@@ -65,6 +65,103 @@ The main task communication primitives used in the code are:
 - task notifications for timer-driven sensor send/store events
 - mutex-protected UART printing
 
+## System Diagram
+
+```text
+================================================================================
+                        TM4C123 SENSOR LOGGER SYSTEM
+================================================================================
+
+                          ┌────────────────────────────┐
+                          │        PC TERMINAL         │
+                          │        (UART0)             │
+                          └────────────┬───────────────┘
+                                       │
+                              UART0 ISR (DEBUG RX)
+                                       │
+                     Stream Buffer (uart_debug_rx_buffer)
+                                       │
+                                       ▼
+                    ┌──────────────────────────┐
+                    │ DEBUG_CONSOLE_TASK       │
+                    │ - parse commands         │
+                    │ - send to debug_queue    │
+                    └────────────┬─────────────┘
+                                 │
+                                 ▼
+                          ┌──────────────┐
+                          │ DEBUG_TASK   │
+                          │ diagnostics  │
+                          └──────┬───────┘
+                                 │
+                                 │ Direct sensor access for debug flows
+                                 ▼
+
+
+                          ┌────────────────────────────┐
+                          │        BLE MODULE          │
+                          │        (UART1)             │
+                          └────────────┬───────────────┘
+                                       │
+                              UART1 ISR (BLE RX)
+                                       │
+                      Stream Buffer (uart_ble_rx_buffer)
+                                       │
+                                       ▼
+                         ┌────────────────────────┐
+                         │ BLE_RECEIVE_TASK       │
+                         │ - parse BLE commands   │
+                         └──────────┬─────────────┘
+                                    │ Queue (Ble_commands)
+                                    ▼
+                              ┌──────────────┐
+                              │ SENSOR_TASK  │
+                              │ (Core Engine)│
+                              └──────┬───────┘
+                                     │
+     ┌───────────────────────────────┼───────────────────────────────┐
+     │                               │                               │
+     ▼                               ▼                               ▼
+┌──────────────┐            ┌──────────────┐              ┌──────────────┐
+│ Sensor Read  │            │ Data Format  │              │ EEPROM       │
+│ (Drivers)    │            │ + BLE Packet │              │ Logging      │
+└──────┬───────┘            └──────┬───────┘              └──────┬───────┘
+       │                           │                             │
+       ▼                           ▼                             ▼
+ ┌──────────────┐         ┌──────────────┐              ┌──────────────┐
+ │ BMP180       │         │ BLE_SEND_TASK│              │ EEPROM HW    │
+ │ MPU6050      │         │ (UART1 TX)   │              │ (Internal)   │
+ │ HMC5883L     │         └──────────────┘              └──────────────┘
+ └──────┬───────┘
+        │
+        ▼
+  ┌──────────────┐
+  │ I2C DRIVER   │
+  │ (I2C2)       │
+  └──────┬───────┘
+         │
+         ▼
+  ┌──────────────┐
+  │ I2C2 ISR     │
+  │ → Queue      │
+  └──────────────┘
+
+
+================================================================================
+                         TIMER + EVENT SYSTEM
+================================================================================
+
+   SEND TIMER  → SENSOR_TASK (notify SEND)
+   STORE TIMER → SENSOR_TASK (notify STORE)
+
+
+================================================================================
+                         WATCHDOG SYSTEM
+================================================================================
+
+   All tasks → wdt_update() → WDT_MANAGER_TASK → Hardware Watchdog
+```
+
 ## Sensor Flow
 
 The sensor subsystem supports two styles of operation:
@@ -78,6 +175,28 @@ In the current implementation:
 - a second timer drives slower EEPROM logging
 - `SENSOR_TASK` receives timer notifications and processes the active sensor mode
 - sensor health is monitored and failed devices are re-initialized periodically
+
+## Data Flow Summary
+
+BLE flow:
+
+- BLE module → UART1 ISR → stream buffer → `BLE_RECEIVE_TASK`
+- `BLE_RECEIVE_TASK` → `Ble_commands` queue → `SENSOR_TASK`
+- `SENSOR_TASK` → format response → `BLE_SEND_TASK` → UART1 TX
+
+Debug flow:
+
+- PC terminal → UART0 ISR → debug RX stream buffer → `DEBUG_CONSOLE_TASK`
+- `DEBUG_CONSOLE_TASK` → `debug_queue` → `DEBUG_TASK`
+- `DEBUG_TASK` can trigger direct diagnostic sensor actions
+
+I2C flow:
+
+- `SENSOR_TASK` → I2C driver → I2C2 ISR / event queue → sensor transaction result
+
+Storage flow:
+
+- `SENSOR_TASK` → EEPROM record creation → internal EEPROM circular buffer
 
 ## Peripherals and Interfaces
 
