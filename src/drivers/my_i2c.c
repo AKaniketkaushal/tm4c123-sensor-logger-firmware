@@ -491,29 +491,6 @@ void i2c_scan(void)
     UARTPrint("Scan complete\r\n");
 }
 
-// void i2c_scan(void)
-// {
-//     UARTPrint("Scanning I2C bus (via driver)...\r\n");
-//     char buf[40];
-//     uint8_t dummy = 0;
-
-//     for (uint8_t addr = 0x08; addr < 0x78; addr++)
-//     {
-//         // Use the actual driver — this will trigger the callback on NACK
-//         i2c_status_t result = i2c_read_byte_addr(I2C2_BASE, addr, 0x00, &dummy);
-
-//         if (result == I2C_OK)
-//         {
-//             snprintf(buf, sizeof(buf), "Device at: 0x%02X (reg[0x00]=0x%02X)\r\n", addr, dummy);
-//             UARTPrint(buf);
-//         }
-
-//         vTaskDelay(pdMS_TO_TICKS(5));
-//     }
-
-//     UARTPrint("Scan complete\r\n");
-// }
-
 void probe_unknown_devices(void)
 {
     char buf[60];
