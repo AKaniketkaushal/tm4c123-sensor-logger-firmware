@@ -30,26 +30,6 @@ void DEBUG_CONSOLE_TASK(void *pvParameters)
     int idx = 0;
     while (1)
     {
-        // uint8_t c;
-        // if (xQueueReceive(i2c_isr_message, &c, 0) == pdTRUE)
-        // {
-        //     if (c & I2C_EVT_NACK_ADDR)
-        //     {
-        //         UARTPrint("I2C NACK on Address\r\n");
-        //     }
-        //     if (c & I2C_EVT_NACK_DATA)
-        //     {
-        //         UARTPrint("I2C NACK on Data\r\n");
-        //     }
-        //     if (c & I2C_EVT_CLK_TIMEOUT)
-        //     {
-        //         UARTPrint("I2C Clock Timeout\r\n");
-        //     }
-        //     if (c & I2C_ARBITRATION_LOST)
-        //     {
-        //         UARTPrint("I2C Arbitration Lost\r\n");
-        //     }
-        // }
 
         bytes_received = xStreamBufferReceive(uart1_str_buffer, temp_buffer, sizeof(temp_buffer) - 1, buffer_wait_time);
         if (bytes_received > 0)
