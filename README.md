@@ -67,7 +67,6 @@ The main task communication primitives used in the code are:
 
 ## System Diagram
 
-For the full styled architecture view, see [architecture.html](architecture.html).
 
 ```text
 ================================================================================
