@@ -1,0 +1,328 @@
+# TM4C123 Sensor Logger — ISR-Driven I2C · FreeRTOS · BLE Telemetry
+
+![Platform](https://img.shields.io/badge/platform-TM4C123GXL-blue?style=flat-square)
+![Language](https://img.shields.io/badge/language-C11-lightgrey?style=flat-square)
+![RTOS](https://img.shields.io/badge/RTOS-FreeRTOS-green?style=flat-square)
+![Toolchain](https://img.shields.io/badge/toolchain-arm--none--eabi-orange?style=flat-square)
+![Build](https://img.shields.io/badge/build-CMake-red?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-yellow?style=flat-square)
+
+FreeRTOS-based firmware for the **TI EK-TM4C123GXL LaunchPad** that reads three I2C sensors, streams telemetry wirelessly over BLE, exposes a UART debug console, logs timestamped records to a circular EEPROM buffer, and supervises all task liveness with a software watchdog layered over the TM4C123 hardware WDT.
+
+![Firmware Architecture](docs/firmware_architecture.png)
+
+> Full interactive diagram: [docs/firmware_architecture.html](docs/firmware_architecture.html)
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Hardware](#hardware)
+- [Software Stack](#software-stack)
+- [Project Highlights](#project-highlights)
+- [Runtime Architecture](#runtime-architecture)
+- [Sensor Flow](#sensor-flow)
+- [Data Flow Summary](#data-flow-summary)
+- [Debug Commands](#debug-commands)
+- [Build, Flash & Debug](#build-flash--debug)
+- [Project Structure](#project-structure)
+- [Known Limitations](#known-limitations)
+- [Roadmap](#roadmap)
+- [What This Project Demonstrates](#what-this-project-demonstrates)
+
+---
+
+## Quick Start
+
+1. Clone the repository
+2. Install `arm-none-eabi-gcc` (≥ 10.x) and CMake (≥ 3.16)
+3. Wire sensors and BLE module per the [pin table below](#hardware)
+4. Configure and build:
+   ```powershell
+   cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=toolchain-arm-none-eabi.cmake
+   cmake --build build
+   ```
+5. Flash `build/tm4c123gxl.elf` via OpenOCD (see [Build, Flash & Debug](#build-flash--debug))
+6. Open a serial terminal on **UART1 at 115200 baud**
+7. Send `SYSTEM_STATUS` — all three sensors should be reported as OK
+
+---
+
+## Hardware
+
+### Bill of Materials
+
+| Component | Part | Notes |
+|-----------|------|-------|
+| MCU board | TI EK-TM4C123GXL LaunchPad | TM4C123GH6PM · ARM Cortex-M4F · 80 MHz |
+| Pressure / temp | BMP180 | I2C addr 0x77 |
+| Accel / gyro | MPU6050 | I2C addr 0x68 |
+| Magnetometer | QMC5883L / HMC5883L-compatible | I2C addr 0x2C |
+| BLE module | HW-290 / AT-09 class (CC2541) | UART passthrough |
+
+### Pin Connections
+
+| Signal | TM4C123 Pin | Peripheral |
+|--------|-------------|------------|
+| BLE module RX | PE0 (UART0 RX) | BLE UART TX |
+| BLE module TX | PE1 (UART0 TX) | BLE UART RX |
+| Debug terminal RX | PC4 (UART1 RX) | USB-UART TX |
+| Debug terminal TX | PC5 (UART1 TX) | USB-UART RX |
+| I2C SDA (all sensors) | PE4 (I2C2 SDA) | BMP180 · MPU6050 · Magnetometer |
+| I2C SCL (all sensors) | PE5 (I2C2 SCL) | BMP180 · MPU6050 · Magnetometer |
+
+> All I2C devices share the I2C2 bus. External pull-ups (4.7 kΩ to 3.3 V) are required on SDA and SCL.
+
+---
+
+## Software Stack
+
+| Layer | Component |
+|-------|-----------|
+| Language | C11 |
+| RTOS | FreeRTOS |
+| Peripheral library | TivaWare |
+| Core support | CMSIS |
+| Build system | CMake + `toolchain-arm-none-eabi.cmake` |
+| Toolchain | GNU Arm Embedded (`arm-none-eabi-gcc`) |
+| Debug | OpenOCD + GDB (VS Code Cortex-Debug) |
+
+---
+
+## Project Highlights
+
+- **Custom CMake build** — hand-configured toolchain file instead of IDE-generated project; keeps the build path explicit and auditable
+- **CMSIS startup ownership** — custom `startup.c`, `system_TM4C123.c`, and `HardFault_Handler`; no vendor IDE scaffold
+- **ISR-driven I2C driver** — interrupt-driven I2C2 with TM4C errata fix #I2C#07: `IntStatusEx()` read **before** `IntClearEx()` to avoid dropped events; mutex-protected with 20 ms ISR queue timeout
+- **9-pulse GPIO bitbang bus recovery** — `recover_i2c_bus()` clocks out stuck SDA conditions before re-initializing the peripheral
+- **FreeRTOS task architecture** — queues, stream buffers, software timers, and task notifications; no polling loops
+- **Dual-rate sensor pipeline** — 1 s BLE send timer and 30 s EEPROM store timer driven independently via `xTaskNotify`
+- **EEPROM circular ring buffer** — `eeprom_metadata_t` with `magic = 0xAB` boot guard; wraparound managed by `push_to_eeprom()`
+- **Multi-task watchdog** — each task sets a dedicated liveness bit; `WDT_MANAGER_TASK` validates all bits and refreshes the hardware WDT; any hung task triggers `SysCtlReset()`
+- **Sensor health monitor** — `check_sensor_health()` runs every 40 task loop ticks (~2 s); detects failures per sensor and calls the matching reinit + recalibration routine
+
+---
+
+## Supported Sensors
+
+| Sensor | Measurement | Driver details |
+|--------|-------------|----------------|
+| BMP180 | Temperature · Pressure | Datasheet §4.1.3 compensation: `UT → B5 → T`, `UP → B3/B4/B7 → p` |
+| MPU6050 | Accelerometer (±2 g) · Gyroscope (±250 °/s) | DLPF 44 Hz · 1 kHz sample rate · 150-sample bias calibration at startup · I2C bypass for magnetometer access |
+| QMC5883L / HMC5883L | Heading (magnetometer) | 200 Hz continuous · status reg 0x06 poll · Delhi magnetic declination correction +5.53° (+0.0965 rad) |
+
+---
+
+## Runtime Architecture
+
+The firmware is organized around six FreeRTOS tasks:
+
+| Task | Responsibility |
+|------|---------------|
+| `SENSOR_TASK` | Owns sensor reads, continuous sampling timers, EEPROM logging, sensor health monitoring |
+| `BLE_RECEIVE_TASK` | Parses UART0 input into `sensor_modes_t` commands; pushes to `Ble_commands` queue |
+| `BLE_SEND_TASK` | Dequeues `ble_msg` structs from `Ble_responses` and transmits over UART0 |
+| `DEBUG_CONSOLE_TASK` | Parses UART1 text commands; pushes work to `debug_queue` |
+| `DEBUG_TASK` | Executes diagnostics, I2C scan, direct sensor reads |
+| `WDT_MANAGER_TASK` | Validates per-task liveness bits; refreshes hardware WDT0 |
+
+### IPC Primitives
+
+| Primitive | Usage |
+|-----------|-------|
+| `xStreamBuffer` | UART ISR → task data transfer (`uart_ble_rx_buffer`, `uart_debug_rx_buffer`) |
+| `xQueue` | Command dispatch (`Ble_commands`, `Ble_responses`, `debug_queue`) and I2C ISR event queue |
+| `xTaskNotify` | Timer callbacks → `SENSOR_TASK` for `NOTIFY_SEND` and `NOTIFY_STORE` |
+| `xSemaphoreMutex` | UART print protection · I2C driver serialization |
+| Software timers | `send_timer` (1 s auto-reload) · `store_timer` (30 s auto-reload) |
+
+---
+
+## Sensor Flow
+
+`SENSOR_TASK` supports two acquisition styles:
+
+**One-shot** — command arrives → `process_sensor_mode()` runs once → timers remain stopped.
+
+**Continuous** — command arrives → `xTimerStart()` for both timers → `send_timer` fires every 1 s (`store_enable = false`) → `store_timer` fires every 30 s (`store_enable = true`) → `SENSOR_TASK` wakes via `xTaskNotifyWait()` and dispatches accordingly.
+
+Sensor selection per command:
+
+| Command | Sensor(s) read |
+|---------|---------------|
+| `SENSORA` / `SENSORA_CONT` | BMP180 (temp + pressure) |
+| `SENSORB` / `SENSORB_CONT` | MPU6050 (accel + gyro) |
+| `SENSORC` / `SENSORC_CONT` | HMC5883L (heading) |
+| `SENSOR_ALL` / `SENSOR_ALL_CONT` | All three |
+
+---
+
+## Data Flow Summary
+
+```
+BLE receive:
+  BLE module → UART0 ISR → uart_ble_rx_buffer → BLE_RECEIVE_TASK
+  BLE_RECEIVE_TASK → Ble_commands queue → SENSOR_TASK
+
+BLE send:
+  SENSOR_TASK → send_*_ble() formatters → Ble_responses queue
+  Ble_responses queue → BLE_SEND_TASK → UART0 TX → BLE module
+
+Debug:
+  PC terminal → UART1 ISR → uart_debug_rx_buffer → DEBUG_CONSOLE_TASK
+  DEBUG_CONSOLE_TASK → debug_queue → DEBUG_TASK
+
+I2C:
+  SENSOR_TASK → I2C driver (mutex) → I2C2 peripheral
+  I2C2 ISR → i2c_isr_message queue → i2c_wait() unblocks driver
+  timeout → i2c_reinit() → recover_i2c_bus() → retry
+
+Storage:
+  SENSOR_TASK (NOTIFY_STORE) → store_sensor_data() → push_to_eeprom()
+  → EEPROMProgram() → internal EEPROM circular buffer
+```
+
+---
+
+## Debug Commands
+
+Connect to **UART1 at 115200 baud** and send any of:
+
+| Command | Action |
+|---------|--------|
+| `SYSTEM_STATUS` | Print sensor health flags and WDT status |
+| `I2C_SCAN` | Scan I2C2 bus and print detected addresses |
+| `BLE_CHECK_CONNECTION` | Query BLE module connection state |
+| `READ_SENSORA` | One-shot BMP180 read to debug UART |
+| `READ_SENSORB` | One-shot MPU6050 read to debug UART |
+| `READ_SENSORC` | One-shot magnetometer read to debug UART |
+| `READ_ALL_SENSORS` | One-shot read of all three sensors |
+| `CALIBRATE_HMC5883L` | Start magnetometer hard-iron calibration |
+| `CALIB_STOP` | Stop calibration and apply offsets |
+| `display_eeprom` | Dump stored EEPROM records to debug UART |
+
+Command parsing and execution: [`src/debug/my_debug.c`](src/debug/my_debug.c)
+
+---
+
+## Build, Flash & Debug
+
+### Prerequisites
+
+- `arm-none-eabi-gcc` ≥ 10.x — [ARM Developer downloads](https://developer.arm.com/downloads/-/gnu-rm)
+- CMake ≥ 3.16
+- OpenOCD with TI ICDI support
+
+### Build
+
+```powershell
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=toolchain-arm-none-eabi.cmake
+cmake --build build
+```
+
+Generated artifacts:
+
+| File | Description |
+|------|-------------|
+| `build/tm4c123gxl.elf` | ELF with debug symbols |
+| `build/tm4c123gxl.bin` | Raw binary for flashing |
+| `build/tm4c123gxl.hex` | Intel HEX format |
+
+### Flash via OpenOCD
+
+```bash
+openocd -f interface/ti-icdi.cfg -f board/ek-tm4c123gxl.cfg \
+  -c "program build/tm4c123gxl.elf verify reset exit"
+```
+
+### Debug in VS Code
+
+1. Install the **Cortex-Debug** extension
+2. Install **OpenOCD**
+3. Use the provided `.vscode/launch.json` (if included) or configure:
+   - `interface/ti-icdi.cfg`
+   - `board/ek-tm4c123gxl.cfg`
+   - ELF path: `build/tm4c123gxl.elf`
+
+---
+
+## Project Structure
+
+```
+.
+├── src/
+│   ├── core/          # main.c · system init · RTOS object/task creation · HardFault_Handler
+│   ├── drivers/       # UART and I2C peripheral drivers
+│   ├── sensor/        # Sensor init · acquisition · calibration · timers · EEPROM records
+│   ├── ble/           # BLE send/receive tasks · command dispatch
+│   ├── debug/         # Debug console · command parsing · diagnostics
+│   ├── wdt/           # Watchdog manager · task heartbeat tracking
+│   ├── utils/         # String formatting (split_float, my_itoa) · helpers
+│   └── middleware/    # FreeRTOSConfig.h and middleware configuration
+├── linker/            # Linker script for TM4C123GH6PM
+├── FreeRTOS/          # FreeRTOS kernel sources
+├── CMSIS/             # CMSIS core + TM4C device support + startup.c
+├── tivaware/          # TivaWare peripheral driver library
+├── docs/              # Architecture diagram (PNG + HTML)
+├── CMakeLists.txt
+└── toolchain-arm-none-eabi.cmake
+```
+
+---
+
+## Startup and Runtime Bring-Up
+
+| File | Role |
+|------|------|
+| [`CMSIS/Device/Source/startup.c`](CMSIS/Device/Source/startup.c) | Reset handler · vector table · BSS/data init |
+| [`CMSIS/Device/Source/system_TM4C123.c`](CMSIS/Device/Source/system_TM4C123.c) | System clock configuration |
+| [`src/core/main.c`](src/core/main.c) | `HardFault_Handler` · peripheral init · task creation · `vTaskStartScheduler()` |
+
+The startup path is explicitly owned by the project rather than generated by a vendor IDE. This keeps every stage of bring-up visible and auditable in source control.
+
+---
+
+## Known Limitations
+
+These are tracked issues being actively worked on:
+
+- **`status &=` in I2C init** — chaining return codes with `&=` can silently swallow a failed transaction; replacing with per-call early-return error handling
+- **`discrete_mode` flag not cleared** — after a one-shot command fires, the flag stays set and wastes one branch per 50 ms loop iteration; functionally harmless
+- **BLE framing is plain newline-delimited text** — no checksum or sequence numbers; malformed packets are silently dropped
+- **EEPROM validation is magic-byte only** — per-record CRC not yet implemented; a partial write leaves a corrupt record readable
+- **Debug output is synchronous** — `UARTPrint()` calls in ISR-adjacent paths can cause brief blocking under heavy sensor load
+
+---
+
+## Roadmap
+
+- Replace `status &=` error handling with early-return chains across all init paths
+- Implement structured BLE framing with length prefix and checksum
+- Add per-record CRC to EEPROM storage and validate on read
+- Persist calibration data (MPU6050 bias, magnetometer hard-iron offsets) to EEPROM across power cycles
+- Move debug printing fully off synchronous paths (DMA UART TX or dedicated print queue)
+- Add `.vscode/launch.json` for one-click OpenOCD debug setup
+
+---
+
+## What This Project Demonstrates
+
+| Skill area | Specific implementation |
+|------------|------------------------|
+| RTOS task design | 6-task architecture with clear ownership boundaries |
+| ISR-to-task communication | UART stream buffers · I2C event queue · task notifications |
+| Interrupt-driven driver | I2C2 ISR with TM4C errata fix and bus recovery |
+| Sensor integration | BMP180 compensation chain · MPU6050 calibration · magnetometer declination |
+| Telemetry pipeline | BLE command/response protocol with formatter layer |
+| Persistent logging | EEPROM ring buffer with metadata guard |
+| Fault tolerance | Per-sensor health monitor with reinit · 9-pulse bus recovery |
+| Watchdog design | Per-task liveness bits · hardware WDT refresh from supervisor task |
+| Build system | Hand-configured CMake + custom toolchain file |
+| Startup ownership | CMSIS startup + custom HardFault handler (no IDE scaffold) |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE)
