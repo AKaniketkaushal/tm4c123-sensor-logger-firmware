@@ -206,8 +206,8 @@ Storage flow:
 
 ## Peripherals and Interfaces
 
-- `UART0`: debug console input/output
-- `UART1`: BLE module interface
+- `UART0`: BLE module interface
+- `UART1`: debug console input/output
 - `I2C2`: shared sensor bus
 - internal EEPROM: circular record storage
 
