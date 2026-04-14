@@ -98,12 +98,13 @@ For the full styled architecture view, see [architecture.html](architecture.html
                              | diagnostics  |
                              +------+-------+
                                     |
-                                    | direct diagnostic sensor access
+                                    | 
                                     v
+                    direct diagnostic sensor access
+
 
 
                             BLE / UART0 PATH
-
                          +----------------------------+
                          |        BLE MODULE          |
                          |           UART0            |
