@@ -1,5 +1,11 @@
 # TM4C123 Sensor Logger Firmware
 
+![Platform](https://img.shields.io/badge/platform-TM4C123GXL-blue?style=flat-square)
+![Language](https://img.shields.io/badge/language-C11-informational?style=flat-square)
+![RTOS](https://img.shields.io/badge/RTOS-FreeRTOS-00a884?style=flat-square)
+![Build](https://img.shields.io/badge/build-CMake-orange?style=flat-square)
+![Toolchain](https://img.shields.io/badge/toolchain-arm--none--eabi-critical?style=flat-square)
+
 FreeRTOS-based firmware for the TI TM4C123GXL LaunchPad that reads multiple sensors, streams telemetry over BLE, exposes a UART debug console, logs records to internal EEPROM, and supervises task liveness with a software watchdog layered over the TM4C123 hardware watchdog.
 
 ## Overview
