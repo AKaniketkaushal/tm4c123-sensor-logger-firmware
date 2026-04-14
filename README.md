@@ -186,9 +186,9 @@ In the current implementation:
 
 BLE flow:
 
-- BLE module -> UART1 ISR -> stream buffer -> `BLE_RECEIVE_TASK`
+- BLE module -> UART0 ISR -> stream buffer -> `BLE_RECEIVE_TASK`
 - `BLE_RECEIVE_TASK` -> `Ble_commands` queue -> `SENSOR_TASK`
-- `SENSOR_TASK` -> format response -> `BLE_SEND_TASK` -> UART1 TX
+- `SENSOR_TASK` -> format response -> `BLE_SEND_TASK` -> UART0 TX
 
 Debug flow:
 
